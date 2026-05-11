@@ -124,7 +124,7 @@ function getRoomPayload(room) {
     })),
     scores: room.scores, currentQ: room.currentQ, totalQ: room.questions.length,
     activeQuestion: room.state !== 'LOBBY' && room.state !== 'RESULT' ? { category: room.questions[room.currentQ].category, answer: room.questions[room.currentQ].answer } : null,
-    clues: room.clues, activeSkills: room.activeSkills,
+    clues: room.clues, activeSkills: room.activeSkills, skillTargets: room.skillTargets || {},
     teamSkills: room.teamSkills || {}, usedSkills: room.usedSkills || {}, hintsRemaining: room.hintsRemaining || {}, hintsForRound: room.hintsForRound || {},
     noClueTeams: room._noClueTeams || []
   };
@@ -338,7 +338,7 @@ wss.on('connection', (ws, req) => {
         room.hintsRemaining = {};
         room.hintsForRound = {};
         for(let i=1; i<=room.maxTeams; i++) room.hintsRemaining[i] = 2;
-        const ALL_SKILLS = ['double_point', 'extra_time', 'shield', 'emoji_chaos', 'blur_vision', 'fake_shake', 'lucky_bonus', 'risk_gamble', 'point_steal'];
+        const ALL_SKILLS = ['double_point', 'shield', 'emoji_chaos', 'blur_vision', 'fake_shake', 'lucky_bonus', 'risk_gamble', 'point_steal'];
         for(let i=1; i<=room.maxTeams; i++) {
           const skills = [];
           const pool = [...ALL_SKILLS];
@@ -417,12 +417,17 @@ wss.on('connection', (ws, req) => {
           
           if (isPointSteal) {
             let stolen = 0;
-            for (let i = 1; i <= room.maxTeams; i++) {
-              if (i !== p.team && room.teamSkills && room.teamSkills[i]) {
-                 const stealAmt = 250;
-                 room.scores[i] = Math.max(0, (room.scores[i] || 0) - stealAmt);
-                 stolen += stealAmt;
-              }
+            const targetTeam = room.skillTargets?.[p.team];
+            if (targetTeam && room.scores[targetTeam] !== undefined) {
+               const stealAmt = 250;
+               room.scores[targetTeam] = Math.max(0, (room.scores[targetTeam] || 0) - stealAmt);
+               stolen += stealAmt;
+               
+               room.players.forEach(op => {
+                 if (op.team === targetTeam) {
+                   send(op.ws, {type: 'stolen_alert', fromTeam: p.team, amount: stealAmt});
+                 }
+               });
             }
             room.scores[p.team] += stolen;
           }
@@ -475,14 +480,24 @@ wss.on('connection', (ws, req) => {
         room.activeSkills[p.team] = msg.skillId;
         room.usedSkills[p.team][msg.skillId] = true;
         
-        if (msg.skillId === 'extra_time' && room._timerInterval) {
-          room._timeLeft += 10;
+        const targetableTeams = [];
+        for(let i=1; i<=room.maxTeams; i++) {
+          if (i !== p.team) targetableTeams.push(i);
         }
+        const targetTeam = targetableTeams[Math.floor(Math.random() * targetableTeams.length)];
+        
+        if (!room.skillTargets) room.skillTargets = {};
+        room.skillTargets[p.team] = targetTeam;
         
         // broadcast skill_used
-        const payload = { type: 'skill_used', team: p.team, skillId: msg.skillId, playerName: user.username };
+        const payload = { type: 'skill_used', team: p.team, skillId: msg.skillId, playerName: user.username, targetTeam };
         if(room.hostWs) send(room.hostWs, payload);
-        room.players.forEach(op => send(op.ws, payload));
+        room.players.forEach(op => {
+          send(op.ws, payload);
+          if (['emoji_chaos', 'blur_vision', 'fake_shake'].includes(msg.skillId) && op.team === targetTeam) {
+            send(op.ws, { type: 'debuff_alert', skillId: msg.skillId, fromTeam: p.team });
+          }
+        });
         
         broadcastRoom(room.id);
         break;
@@ -613,7 +628,7 @@ function startCluePhase(roomId) {
   room.state = 'CLUE';
   broadcastRoom(roomId);
   
-  room._timeLeft = 15;
+  room._timeLeft = 60;
   room.players.forEach(p => send(p.ws, {type: 'timer_tick', seconds: room._timeLeft}));
   
   room._timerInterval = setInterval(() => {
@@ -634,6 +649,7 @@ function endCluePhase(roomId) {
   room.state = 'GUESS';
   room._guessed = {};
   room.hintsForRound = {};
+  room._teamExtraTime = {};
   
   // Check teams that didn't submit clue and apply penalty
   const noClueTeams = [];
@@ -654,8 +670,22 @@ function endCluePhase(roomId) {
   
   room._timerInterval = setInterval(() => {
     room._timeLeft--;
-    room.players.forEach(p => send(p.ws, {type: 'timer_tick', seconds: room._timeLeft}));
-    if(room._timeLeft <= 0) {
+    room.players.forEach(p => {
+      const extra = (room._teamExtraTime && room._teamExtraTime[p.team]) ? room._teamExtraTime[p.team] : 0;
+      const personalTime = Math.max(0, room._timeLeft + extra);
+      send(p.ws, {type: 'timer_tick', seconds: personalTime});
+    });
+    
+    let maxTimeLeft = room._timeLeft;
+    if (room._teamExtraTime) {
+      for (const t in room._teamExtraTime) {
+        if (room._timeLeft + room._teamExtraTime[t] > maxTimeLeft) {
+          maxTimeLeft = room._timeLeft + room._teamExtraTime[t];
+        }
+      }
+    }
+
+    if(maxTimeLeft <= 0) {
       clearInterval(room._timerInterval);
       nextQuestion(roomId);
     }

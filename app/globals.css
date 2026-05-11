@@ -48,6 +48,27 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .ans-input.wrong{border-color:#FF2D78!important;background:rgba(255,45,120,0.08)!important;box-shadow:0 0 0 3px rgba(255,45,120,0.15)!important;animation:shake 0.4s ease;}
 @keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-5px)}80%{transform:translateX(5px)}}
 
+@keyframes extreme-spin {
+  0% { transform: rotate(0deg) scale(1); }
+  25% { transform: rotate(90deg) scale(1.2); }
+  50% { transform: rotate(180deg) scale(0.8); }
+  75% { transform: rotate(270deg) scale(1.1); }
+  100% { transform: rotate(360deg) scale(1); }
+}
+
+@keyframes extreme-shake {
+  0% { transform: translate(0, 0) rotate(0deg); }
+  10% { transform: translate(-15px, -15px) rotate(-10deg); }
+  20% { transform: translate(-15px, 15px) rotate(-10deg); }
+  40% { transform: translate(15px, -15px) rotate(10deg); }
+  50% { transform: translate(-20px, 0) rotate(-15deg); }
+  60% { transform: translate(20px, 0) rotate(15deg); }
+  70% { transform: translate(0, -20px) rotate(-10deg); }
+  80% { transform: translate(0, 20px) rotate(10deg); }
+  90% { transform: translate(-10px, -10px) rotate(-5deg); }
+  100% { transform: translate(0, 0) rotate(0deg); }
+}
+
 /* progress bar */
 .prog-bar{height:4px;background:rgba(255,255,255,0.08);border-radius:2px;overflow:hidden;}
 .prog-fill{height:100%;background:linear-gradient(90deg,#00F5FF,#BF5AF2);border-radius:2px;transition:width 0.4s ease;}

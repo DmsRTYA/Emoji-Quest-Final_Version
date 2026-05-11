@@ -34,21 +34,32 @@ export default function GameScreen({ mode, user, onBack, onGameEnd }: Props) {
   const timerRef  = useRef<NodeJS.Timeout|null>(null);
   const scoreRef  = useRef(0);
   const cfg = CFG[mode];
-  const audio = useGameAudio();
-  const sfx = useCallback((fn:()=>void)=>{ if(!muted) fn(); },[muted]);
+  const { isMuted, toggleMute, playCorrect, playWrong, playTimerDanger, playStreak, playCountdown, playHint, playBGM, stopBGM } = useGameAudio();
 
   useEffect(()=>{
     fetch(`/api/game/questions?mode=${mode}`).then(r=>r.json()).then(d=>{ setQuestions(d.questions||[]); setPhase('countdown'); });
   },[mode]);
 
+  useEffect(() => {
+    if (phase === 'countdown' || phase === 'playing') {
+      playBGM();
+    } else {
+      stopBGM();
+    }
+  }, [phase, playBGM, stopBGM]);
+
+  useEffect(() => {
+    return () => stopBGM();
+  }, [stopBGM]);
+
   // Countdown
   useEffect(()=>{
     if(phase!=='countdown') return;
     if(countdown<=0){ setPhase('playing'); return; }
-    sfx(()=>audio.playCountdown(countdown));
+    playCountdown(countdown);
     const t=setTimeout(()=>setCountdown(c=>c-1),1000);
     return()=>clearTimeout(t);
-  },[phase,countdown,sfx]);
+  },[phase,countdown,playCountdown]);
 
   // Timer
   useEffect(()=>{
@@ -56,13 +67,13 @@ export default function GameScreen({ mode, user, onBack, onGameEnd }: Props) {
     setTimeLeft(cfg.time);
     timerRef.current=setInterval(()=>{
       setTimeLeft(t=>{
-        if(t<=6&&t>1) sfx(audio.playTimerDanger);
+        if(t<=6&&t>1) playTimerDanger();
         if(t<=1){ handleTimeout(); return 0; }
         return t-1;
       });
     },1000);
     return()=>{ if(timerRef.current) clearInterval(timerRef.current); };
-  },[idx,phase]);
+  },[idx,phase,cfg.time,playTimerDanger]);
 
   useEffect(()=>{ if(phase==='playing') inputRef.current?.focus(); },[idx,phase]);
 
@@ -71,11 +82,6 @@ export default function GameScreen({ mode, user, onBack, onGameEnd }: Props) {
     setScorePopups(p=>[...p,{id,value:pts}]);
     setTimeout(()=>setScorePopups(p=>p.filter(x=>x.id!==id)),1100);
   };
-
-  const nextQ=useCallback(()=>{
-    setInputState('idle'); setAnswer(''); setShowHint(false);
-    setIdx(i=>{ if(i+1>=questions.length){ endGame(); return i; } return i+1; });
-  },[questions.length]);
 
   const endGame=useCallback(async()=>{
     setPhase('result');
@@ -88,15 +94,20 @@ export default function GameScreen({ mode, user, onBack, onGameEnd }: Props) {
     }catch{}
   },[mode,results,questions.length]);
 
+  const nextQ=useCallback(()=>{
+    setInputState('idle'); setAnswer(''); setShowHint(false);
+    setIdx(i=>{ if(i+1>=questions.length){ endGame(); return i; } return i+1; });
+  },[questions.length, endGame]);
+
   const handleTimeout=useCallback(()=>{
     if(timerRef.current) clearInterval(timerRef.current);
     const q=questions[idx]; if(!q) return;
-    sfx(audio.playWrong);
+    playWrong();
     setInputState('wrong'); setStreak(0);
     // No answer = 0 points (no penalty for timeout)
     setResults(p=>[...p,{correct:false,points:0,answer:q.answer}]);
     setTimeout(nextQ,1400);
-  },[idx,questions,sfx,nextQ]);
+  },[idx,questions,nextQ,playWrong]);
 
   const submitAnswer=()=>{
     const q=questions[idx]; if(!q||inputState!=='idle') return;
@@ -113,7 +124,7 @@ export default function GameScreen({ mode, user, onBack, onGameEnd }: Props) {
       const pts = Math.round(basePoints * cfg.mult);
       setScore(s=>{ const ns=s+pts; scoreRef.current=ns; return ns; });
       setStreak(s=>s+1);
-      sfx(()=>{ audio.playCorrect(); if(streak+1>=3) audio.playStreak(streak+1); });
+      playCorrect(); if(streak+1>=3) playStreak(streak+1);
       addPopup(pts);
       setInputState('correct');
       setResults(p=>[...p,{correct:true,points:pts,answer:q.answer}]);
@@ -121,7 +132,7 @@ export default function GameScreen({ mode, user, onBack, onGameEnd }: Props) {
     } else {
       const pts = -250; // Wrong answer penalty
       setScore(s=>{ const ns=Math.max(0,s+pts); scoreRef.current=ns; return ns; });
-      sfx(audio.playWrong);
+      playWrong();
       setInputState('wrong'); setStreak(0);
       addPopup(pts);
       setResults(p=>[...p,{correct:false,points:pts,answer:q.answer}]);
@@ -237,8 +248,8 @@ export default function GameScreen({ mode, user, onBack, onGameEnd }: Props) {
             </div>
           )}
           <span style={{fontFamily:"'Clash Display',sans-serif",fontWeight:700,fontSize:18,color:'#F0F0FF'}}>{score.toLocaleString()}</span>
-          <button onClick={()=>setMuted(m=>!m)} style={{background:'none',border:'none',cursor:'pointer',color:'#4A4A6A',display:'flex',transition:'color 0.2s'}} onMouseEnter={e=>{e.currentTarget.style.color='#8888AA';}} onMouseLeave={e=>{e.currentTarget.style.color='#4A4A6A';}}>
-            {muted?<VolumeX size={16}/>:<Volume2 size={16}/>}
+          <button onClick={toggleMute} style={{background:'none',border:'none',cursor:'pointer',color:'#4A4A6A',display:'flex',transition:'color 0.2s'}} onMouseEnter={e=>{e.currentTarget.style.color='#8888AA';}} onMouseLeave={e=>{e.currentTarget.style.color='#4A4A6A';}}>
+            {isMuted?<VolumeX size={16}/>:<Volume2 size={16}/>}
           </button>
         </div>
       </div>
@@ -300,7 +311,7 @@ export default function GameScreen({ mode, user, onBack, onGameEnd }: Props) {
           {/* Action buttons */}
           {inputState==='idle'&&(
             <div style={{display:'flex',gap:10,marginTop:16}}>
-              <button onClick={()=>{sfx(audio.playHint);setHintsUsed(h=>h+1);setShowHint(true);}} disabled={hintsUsed>=2}
+              <button onClick={()=>{playHint();setHintsUsed(h=>h+1);setShowHint(true);}} disabled={hintsUsed>=2}
                 style={{padding:'0 16px',height:48,borderRadius:14,border:hintsUsed>=2?'1px solid rgba(100,100,120,0.4)':'1px solid rgba(191,90,242,0.3)',background:'none',cursor:hintsUsed>=2?'not-allowed':'pointer',color:hintsUsed>=2?'#4A4A6A':'#BF5AF2',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:13,display:'flex',alignItems:'center',gap:6,transition:'all 0.2s',opacity:hintsUsed>=2?0.5:1}} onMouseEnter={e=>{if(hintsUsed<2)e.currentTarget.style.background='rgba(191,90,242,0.08)';}} onMouseLeave={e=>{e.currentTarget.style.background='none';}}>
                 <Star size={15}/> Hint ({2-hintsUsed} remaining)
               </button>

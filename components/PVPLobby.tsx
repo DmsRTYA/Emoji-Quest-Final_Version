@@ -1,17 +1,19 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, Users, Wifi, WifiOff, Crown, Shield, Zap, AlertTriangle, Key, Search, Clock, Trophy, Target, Lock, Globe, Plus, X, Eye, User as UserIcon, Trash2, CheckCircle, XCircle, Sparkles, Smile, HelpCircle, Lightbulb, Send, MessageCircle } from 'lucide-react';
+import { ArrowLeft, Users, Wifi, WifiOff, Crown, Shield, Zap, AlertTriangle, Key, Search, Clock, Trophy, Target, Lock, Globe, Plus, X, Eye, User as UserIcon, Trash2, CheckCircle, XCircle, Sparkles, Smile, HelpCircle, Lightbulb, Send, MessageCircle, AlertCircle, Volume2, VolumeX } from 'lucide-react';
 import type { User } from '@/app/page';
 import dynamic from 'next/dynamic';
 import data from '@emoji-mart/data';
 const Picker = dynamic(() => import('@emoji-mart/react'), { ssr: false });
 import Avatar from '@/components/Avatar';
 import { PulseRing } from '@/components/LoadingStates';
+import { useGameAudio } from '@/hooks/useGameAudio';
 
 interface Props { user: User; onBack: () => void; setUser: (u: User) => void; }
 
 export default function PVPLobby({ user, onBack }: Props) {
+  const audio = useGameAudio();
   const [state, setState] = useState<'home'|'lobby'|'clue'|'transition'|'guess'|'result'|'bersiap'|'round_transition'>('home');
   const [wsConn, setWsConn] = useState(false);
   const [room, setRoom] = useState<any>(null);
@@ -21,6 +23,7 @@ export default function PVPLobby({ user, onBack }: Props) {
   
   const [showCreate, setShowCreate] = useState(false);
   const [createData, setCreateData] = useState({ name: 'Room 1', isPrivate: false, maxTeams: 2, hostPlayMode: 'spectator' });
+  const [isMobile, setIsMobile] = useState(false);
   
   const [joinCode, setJoinCode] = useState('');
   
@@ -28,7 +31,11 @@ export default function PVPLobby({ user, onBack }: Props) {
   const [guess, setGuess] = useState('');
   const [timeLeft, setTimeLeft] = useState(15);
   const [guessResult, setGuessResult] = useState<{correct:boolean,points:number,answer:string}|null>(null);
+  const [stolenAlert, setStolenAlert] = useState<{fromTeam:number, amount:number}|null>(null);
+  const [debuffAlert, setDebuffAlert] = useState<{skillId:string, fromTeam:number}|null>(null);
   const [swapConfirm, setSwapConfirm] = useState<{teammate:string,desiredRole:string}|null>(null);
+
+  // --- Skipped some initial declarations for brevity in thought, but must replace fully ---
   const [incomingSwap, setIncomingSwap] = useState<{from:string,fromRole:string,toRole:string}|null>(null);
   const [swapPending, setSwapPending] = useState(false);
   const [swapAlert, setSwapAlert] = useState<{type:'success'|'error',message:string}|null>(null);
@@ -39,6 +46,12 @@ export default function PVPLobby({ user, onBack }: Props) {
   const [scorePopups, setScorePopups] = useState<Array<{id:number;value:number;x:number;y:number}>>([]);
   const [roundNum, setRoundNum] = useState(0);
   const [countdownNum, setCountdownNum] = useState<number|null>(null);
+  
+  // Alert cooldown states
+  const [lastStolenAlertTime, setLastStolenAlertTime] = useState(0);
+  const [lastDebuffAlertTime, setLastDebuffAlertTime] = useState(0);
+  const [stolenAlertId, setStolenAlertId] = useState<string>('');
+  const [debuffAlertId, setDebuffAlertId] = useState<string>('');
   
   // Chat states
   const [chatMessages, setChatMessages] = useState<Array<{playerId:number;playerName:string;message:string;team:number;timestamp:number}>>([]);
@@ -53,6 +66,17 @@ export default function PVPLobby({ user, onBack }: Props) {
   const prevQRef = useRef<number>(-1);
   const countdownIntervalRef = useRef<NodeJS.Timeout|null>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
+  const stolenAlertTimeoutRef = useRef<NodeJS.Timeout|null>(null);
+  const debuffAlertTimeoutRef = useRef<NodeJS.Timeout|null>(null);
+
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth < 768);
+    };
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
 
   useEffect(() => {
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001';
@@ -65,7 +89,12 @@ export default function PVPLobby({ user, onBack }: Props) {
       ws.onerror = () => setWsConn(false);
       ws.onmessage = e => { try { handleWS(JSON.parse(e.data)); } catch {} };
     } catch { setWsConn(false); }
-    return () => wsRef.current?.close();
+    return () => {
+      wsRef.current?.close();
+      audio.stopBGM();
+      if(stolenAlertTimeoutRef.current) clearTimeout(stolenAlertTimeoutRef.current);
+      if(debuffAlertTimeoutRef.current) clearTimeout(debuffAlertTimeoutRef.current);
+    };
   }, []);
   
   // Auto scroll chat to bottom
@@ -115,7 +144,14 @@ export default function PVPLobby({ user, onBack }: Props) {
       } else {
         setCountdownNum(null);
       }
-    }    
+    }
+    
+    if (['bersiap', 'clue', 'guess', 'round_transition', 'transition'].includes(state)) {
+      audio.playBGM();
+    } else {
+      audio.stopBGM();
+    }
+    
     return () => {
       if(countdownIntervalRef.current) {
         clearInterval(countdownIntervalRef.current);
@@ -135,34 +171,54 @@ export default function PVPLobby({ user, onBack }: Props) {
 
   const handleWS = (msg: any) => {
     if(msg.type === 'error') setErrorMsg(msg.message);
-    if(msg.type === 'kicked') { setErrorMsg(msg.message); setState('home'); setRoom(null); send({type:'get_rooms'}); }
+    if(msg.type === 'kicked') { setErrorMsg(msg.message); setState('home'); setRoom(null); send({type:'get_rooms'}); audio.stopBGM(); }
     if(msg.type === 'global_rooms') setGlobalRooms(msg.rooms);
     if(msg.type === 'clue_submitted') setClueSubmitted(true);
     if(msg.type === 'skill_used') {
       setActiveSkillEffect(msg);
       setTimeout(() => setActiveSkillEffect(null), 3000);
     }
-  if(msg.type === 'chat_message') {
-  // Cegah duplikat dengan mengecek pesan terakhir
-  setChatMessages(prev => {
-    // Jika pesan terakhir sama persis dengan pesan baru, abaikan
-    const lastMsg = prev[prev.length - 1];
-    if (lastMsg && 
-        lastMsg.playerId === msg.playerId && 
-        lastMsg.message === msg.message && 
-        lastMsg.playerName === msg.playerName) {
-      return prev; // Duplikat, abaikan
+    if(msg.type === 'stolen_alert') {
+      const now = Date.now();
+      if (now - lastStolenAlertTime > 1000) { // Minimum 1 second between alerts
+        if(stolenAlertTimeoutRef.current) clearTimeout(stolenAlertTimeoutRef.current);
+        setStolenAlert({fromTeam: msg.fromTeam, amount: msg.amount});
+        setLastStolenAlertTime(now);
+        setStolenAlertId(`stolen-${now}`);
+        stolenAlertTimeoutRef.current = setTimeout(() => {
+          setStolenAlert(null);
+          stolenAlertTimeoutRef.current = null;
+        }, 5000);
+      }
     }
-    return [...prev.slice(-49), msg];
-  });
-  // Hanya increment unread jika pesan dari orang lain dan chat tertutup
-  if (!chatOpen && msg.playerId !== user.id) {
-    setUnreadCount(prev => prev + 1);
-  }
-}
+    if(msg.type === 'debuff_alert') {
+      const now = Date.now();
+      if (now - lastDebuffAlertTime > 1000) { // Minimum 1 second between alerts
+        if(debuffAlertTimeoutRef.current) clearTimeout(debuffAlertTimeoutRef.current);
+        setDebuffAlert({skillId: msg.skillId, fromTeam: msg.fromTeam});
+        setLastDebuffAlertTime(now);
+        setDebuffAlertId(`debuff-${now}`);
+        debuffAlertTimeoutRef.current = setTimeout(() => {
+          setDebuffAlert(null);
+          debuffAlertTimeoutRef.current = null;
+        }, 5000);
+      }
+    }
+    if(msg.type === 'chat_message') {
+      setChatMessages(prev => {
+        const lastMsg = prev[prev.length - 1];
+        if (lastMsg && lastMsg.playerId === msg.playerId && lastMsg.message === msg.message && lastMsg.playerName === msg.playerName) return prev;
+        return [...prev.slice(-49), msg];
+      });
+      if (!chatOpen && msg.playerId !== user.id) {
+        setUnreadCount(prev => prev + 1);
+      }
+    }
     if(msg.type === 'guess_result') {
       guessResultRef.current = msg;
       setGuessResult({correct: msg.correct, points: msg.points, answer: msg.answer});
+      if (msg.correct) audio.playCorrect();
+      else audio.playWrong();
       setTimeout(() => {
         setGuessResult(null);
         guessResultRef.current = null;
@@ -170,6 +226,9 @@ export default function PVPLobby({ user, onBack }: Props) {
     }
     if(msg.type === 'timer_tick') {
       setTimeLeft(msg.seconds);
+      if (msg.seconds > 0 && msg.seconds <= 5 && prevStateRef.current === 'GUESS') {
+        audio.playTimerDanger();
+      }
     }
     if(msg.type === 'room_update') {
       const prevState = prevStateRef.current;
@@ -313,8 +372,8 @@ export default function PVPLobby({ user, onBack }: Props) {
   };
   const useSkill = (id: string) => send({ type: 'use_skill', skillId: id });
   const playAgain = () => send({ type: 'play_again' });
-  const leaveRoom = () => { send({ type: 'leave_room' }); setState('home'); setRoom(null); send({type:'get_rooms'}); };
-  const closeRoom = () => { send({ type: 'close_room' }); setState('home'); setRoom(null); };
+  const leaveRoom = () => { send({ type: 'leave_room' }); setState('home'); setRoom(null); send({type:'get_rooms'}); audio.stopBGM(); };
+  const closeRoom = () => { send({ type: 'close_room' }); setState('home'); setRoom(null); audio.stopBGM(); };
 
   const addScorePopup = (points: number) => {
     const id = Date.now();
@@ -345,8 +404,13 @@ export default function PVPLobby({ user, onBack }: Props) {
     <div style={{minHeight:'100vh',background:'#0A0A0F',display:'flex',flexDirection:'column'}}>
       <nav style={{padding:'clamp(12px,4vw,16px) clamp(16px,5vw,24px)',display:'flex',flexWrap:'wrap',justifyContent:'space-between',alignItems:'center',gap:12,borderBottom:'1px solid rgba(255,255,255,0.05)'}}>
         <button onClick={onBack} style={{background:'none',border:'none',color:'#8888AA',display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:'clamp(12px,3vw,14px)'}}><ArrowLeft size={18}/> KEMBALI</button>
-        <div style={{display:'flex',alignItems:'center',gap:6,color:wsConn?'#30D158':'#FF2D78',fontFamily:"'JetBrains Mono',monospace",fontSize:'clamp(10px,2.5vw,12px)'}}>
-          {wsConn?<Wifi size={14}/>:<WifiOff size={14}/>} {wsConn?'TERKONEKSI':'OFFLINE'}
+        <div style={{display:'flex',alignItems:'center',gap:16}}>
+          <button onClick={audio.toggleMute} style={{background:'none',border:'none',cursor:'pointer',color:'#4A4A6A',display:'flex',transition:'color 0.2s'}} onMouseEnter={e=>{e.currentTarget.style.color='#8888AA';}} onMouseLeave={e=>{e.currentTarget.style.color='#4A4A6A';}}>
+            {audio.isMuted?<VolumeX size={16}/>:<Volume2 size={16}/>}
+          </button>
+          <div style={{display:'flex',alignItems:'center',gap:6,color:wsConn?'#30D158':'#FF2D78',fontFamily:"'JetBrains Mono',monospace",fontSize:'clamp(10px,2.5vw,12px)'}}>
+            {wsConn?<Wifi size={14}/>:<WifiOff size={14}/>} {wsConn?'TERKONEKSI':'OFFLINE'}
+          </div>
         </div>
       </nav>
 
@@ -357,13 +421,13 @@ export default function PVPLobby({ user, onBack }: Props) {
               <h2 style={{fontFamily:"'Clash Display',sans-serif",color:'white',fontSize:'clamp(20px,5vw,24px)'}}>Buat Room</h2>
               <button onClick={()=>setShowCreate(false)} style={{background:'none',border:'none',color:'#8888AA',cursor:'pointer'}}><X/></button>
             </div>
-            <div style={{marginBottom:16}}>
+            <div style={{marginBottom:'clamp(12px,2vw,16px)'}}>
               <label style={{color:'#8888AA',fontSize:'clamp(11px,3vw,12px)',fontFamily:"'JetBrains Mono',monospace"}}>NAMA ROOM</label>
-              <input type="text" value={createData.name} onChange={e=>setCreateData({...createData,name:e.target.value})} style={{width:'100%',background:'rgba(0,0,0,0.5)',border:'1px solid rgba(255,255,255,0.1)',padding:'12px 16px',borderRadius:12,color:'white',marginTop:8,fontFamily:"'Clash Display',sans-serif",fontSize:16,outline:'none'}}/>
+              <input type="text" value={createData.name} onChange={e=>setCreateData({...createData,name:e.target.value})} style={{width:'100%',background:'rgba(0,0,0,0.5)',border:'1px solid rgba(255,255,255,0.1)',padding:'clamp(10px,2vw,12px) clamp(12px,3vw,16px)',borderRadius:12,color:'white',marginTop:'clamp(6px,1vw,8px)',fontFamily:"'Clash Display',sans-serif",fontSize:'clamp(14px,3.5vw,16px)',outline:'none'}}/>
             </div>
-            <div style={{marginBottom:16}}>
+            <div style={{marginBottom:'clamp(12px,2vw,16px)'}}>
               <label style={{color:'#8888AA',fontSize:'clamp(11px,3vw,12px)',fontFamily:"'JetBrains Mono',monospace"}}>TIPE ROOM</label>
-              <div style={{display:'flex',gap:12,marginTop:8,flexWrap:'wrap'}}>
+              <div style={{display:'flex',gap:'clamp(8px,2vw,12px)',marginTop:'clamp(6px,1vw,8px)',flexWrap:'wrap'}}>
                 <button onClick={()=>setCreateData({...createData,isPrivate:false})} style={{flex:1,padding:'12px',borderRadius:12,background:!createData.isPrivate?'rgba(0,245,255,0.1)':'rgba(0,0,0,0.5)',border:!createData.isPrivate?'1px solid rgba(0,245,255,0.4)':'1px solid rgba(255,255,255,0.1)',color:!createData.isPrivate?'#00F5FF':'#8888AA',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:8,fontFamily:"'Clash Display',sans-serif",fontSize:'clamp(12px,3vw,14px)'}}><Globe size={16}/> Publik</button>
                 <button onClick={()=>setCreateData({...createData,isPrivate:true})} style={{flex:1,padding:'12px',borderRadius:12,background:createData.isPrivate?'rgba(255,45,120,0.1)':'rgba(0,0,0,0.5)',border:createData.isPrivate?'1px solid rgba(255,45,120,0.4)':'1px solid rgba(255,255,255,0.1)',color:createData.isPrivate?'#FF2D78':'#8888AA',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:8,fontFamily:"'Clash Display',sans-serif",fontSize:'clamp(12px,3vw,14px)'}}><Lock size={16}/> Private</button>
               </div>
@@ -383,7 +447,7 @@ export default function PVPLobby({ user, onBack }: Props) {
                 <button onClick={()=>setCreateData({...createData,hostPlayMode:'playing'})} style={{flex:1,padding:'12px',borderRadius:12,background:createData.hostPlayMode==='playing'?'rgba(0,245,255,0.1)':'rgba(0,0,0,0.5)',border:createData.hostPlayMode==='playing'?'1px solid rgba(0,245,255,0.4)':'1px solid rgba(255,255,255,0.1)',color:createData.hostPlayMode==='playing'?'#00F5FF':'#8888AA',cursor:'pointer',fontFamily:"'Clash Display',sans-serif",fontSize:'clamp(11px,3vw,14px)',display:'flex',alignItems:'center',justifyContent:'center',gap:6}}><UserIcon size={16}/> Ikut Main</button>
               </div>
             </div>
-            <button onClick={createRoom} style={{width:'100%',padding:'16px',borderRadius:12,background:'linear-gradient(135deg,#BF5AF2,#FF2D78)',border:'none',color:'white',fontFamily:"'Clash Display',sans-serif",fontWeight:700,fontSize:'clamp(14px,4vw,16px)',cursor:'pointer',boxShadow:'0 8px 24px rgba(191,90,242,0.3)'}}>Buat Room Sekarang</button>
+            <button onClick={createRoom} style={{width:'100%',padding:'clamp(12px,2.5vw,16px)',borderRadius:12,background:'linear-gradient(135deg,#BF5AF2,#FF2D78)',border:'none',color:'white',fontFamily:"'Clash Display',sans-serif",fontWeight:700,fontSize:'clamp(13px,3.5vw,16px)',cursor:'pointer',boxShadow:'0 8px 24px rgba(191,90,242,0.3)',height:'clamp(44px,8vw,56px)'}}>Buat Room Sekarang</button>
           </div>
         </div>
       )}
@@ -667,26 +731,88 @@ export default function PVPLobby({ user, onBack }: Props) {
     </div>
   );
 
+  /* IN GAME UI - LEADERBOARD */
+  const RealtimeLeaderboard = () => {
+    const sortedTeams = Array.from({length: room.maxTeams}).map((_, i) => ({ team: i+1, score: room.scores[i+1] || 0 })).sort((a,b) => b.score - a.score);
+    return (
+      <div style={{display:'flex',gap:8,overflowX:'auto',paddingBottom:8,width:'100%',maxWidth:600,justifyContent:'center',marginTop:12}}>
+        {sortedTeams.map((t, idx) => (
+          <div key={t.team} style={{display:'flex',alignItems:'center',gap:6,background:t.team===myPlayer?.team?'rgba(0,245,255,0.1)':'rgba(26,26,38,0.8)',border:`1px solid ${t.team===myPlayer?.team?'rgba(0,245,255,0.3)':'rgba(255,255,255,0.1)'}`,padding:'6px 12px',borderRadius:12,whiteSpace:'nowrap',minWidth:80,justifyContent:'center'}}>
+            <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:10,color:idx===0?'#FFD60A':'#8888AA'}}>#{idx+1}</span>
+            <span style={{fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:13,color:'white'}}>T{t.team} <span style={{color:'#00F5FF',marginLeft:4}}>{t.score}</span></span>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   /* IN GAME UI - HEADER Untuk kedua fase */
   const Header = () => (
-    <div style={{padding:'clamp(12px,3vw,16px) clamp(16px,4vw,24px)',borderBottom:'1px solid rgba(255,255,255,0.05)',display:'flex',flexDirection:'column',alignItems:'center',gap:12}}>
-      <div style={{display:'flex',flexWrap:'wrap',gap:12,justifyContent:'center',width:'100%'}}>
-        {Array.from({length:room.maxTeams}).map((_, idx) => {
-          const t = idx + 1;
-          return (
-            <div key={t} style={{display:'flex',flexDirection:'column',alignItems:'center',opacity:(isHost || myPlayer?.team===t)?1:0.6}}>
-              <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:10,color:'#8888AA'}}>TIM {t}</span>
-              <span style={{fontFamily:"'Clash Display',sans-serif",fontWeight:700,fontSize:'clamp(18px,5vw,20px)',color:(myPlayer?.team===t)?'#00F5FF':'white'}}>{room?.scores[t]||0}</span>
-            </div>
-          )
-        })}
-      </div>
-      <div style={{display:'flex',flexDirection:'column',alignItems:'center'}}>
+    <div style={{padding:'clamp(12px,3vw,16px) clamp(16px,4vw,24px)',borderBottom:'1px solid rgba(255,255,255,0.05)',display:'flex',flexDirection:'column',alignItems:'center',gap:8}}>
+      <div style={{display:'flex',justifyContent:'space-between',width:'100%',maxWidth:600,alignItems:'center'}}>
         <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:'#8888AA'}}>SOAL {room?.currentQ+1}/{room?.totalQ}</span>
-        <div style={{display:'flex',alignItems:'center',gap:8,color:timeLeft<=5?'#FF2D78':'white',fontFamily:"'Clash Display',sans-serif",fontWeight:700,fontSize:'clamp(24px,6vw,28px)'}}><Clock size={24}/> {timeLeft}s</div>
+        <div style={{display:'flex',alignItems:'center',gap:16}}>
+          <button onClick={audio.toggleMute} style={{background:'none',border:'none',cursor:'pointer',color:'#4A4A6A',display:'flex',transition:'color 0.2s'}} onMouseEnter={e=>{e.currentTarget.style.color='#8888AA';}} onMouseLeave={e=>{e.currentTarget.style.color='#4A4A6A';}}>
+            {audio.isMuted?<VolumeX size={18}/>:<Volume2 size={18}/>}
+          </button>
+          <div style={{display:'flex',alignItems:'center',gap:8,color:timeLeft<=5?'#FF2D78':'white',fontFamily:"'Clash Display',sans-serif",fontWeight:700,fontSize:'clamp(16px,4vw,20px)'}}><Clock size={16}/> {timeLeft}s</div>
+        </div>
       </div>
+      <RealtimeLeaderboard />
     </div>
   );
+
+  /* GUESS RESULT POPUP */
+  const GuessResultPopup = () => {
+    if(!guessResult) return null;
+    return (
+      <AnimatePresence>
+        <motion.div initial={{opacity:0,scale:0.8,y:50}} animate={{opacity:1,scale:1,y:0}} exit={{opacity:0,scale:0.8,y:50}} style={{position:'absolute',top:'40%',left:'50%',transform:'translate(-50%,-50%)',zIndex:100,background:guessResult.correct?'rgba(48,209,88,0.95)':'rgba(255,45,120,0.95)',padding:'24px 32px',borderRadius:24,boxShadow:'0 20px 40px rgba(0,0,0,0.5)',textAlign:'center',minWidth:250,backdropFilter:'blur(10px)',border:'1px solid rgba(255,255,255,0.2)'}}>
+          {guessResult.correct ? <CheckCircle size={48} color="white" style={{marginBottom:12, display:'inline-block'}}/> : <XCircle size={48} color="white" style={{marginBottom:12, display:'inline-block'}}/>}
+          <h2 style={{color:'white',fontFamily:"'Clash Display',sans-serif",fontSize:24,marginBottom:8}}>{guessResult.correct ? 'BENAR!' : 'SALAH!'}</h2>
+          <div style={{color:'rgba(255,255,255,0.9)',fontSize:14,marginBottom:8}}>Jawaban: {guessResult.answer}</div>
+          <div style={{color:'white',fontFamily:"'JetBrains Mono',monospace",fontSize:20,fontWeight:'bold'}}>{guessResult.points > 0 ? `+${guessResult.points}` : guessResult.points} PTS</div>
+        </motion.div>
+      </AnimatePresence>
+    );
+  };
+
+  /* STOLEN ALERT POPUP */
+  const StolenAlertPopup = () => {
+    if(!stolenAlert) return null;
+    return (
+      <AnimatePresence key={stolenAlertId}>
+        <motion.div initial={{opacity:0,x:50}} animate={{opacity:1,x:0}} exit={{opacity:0,x:50}} transition={{duration:0.3}} style={{position:'absolute',top:20,right:20,zIndex:105,background:'rgba(255,45,120,0.9)',padding:'16px 20px',borderRadius:16,boxShadow:'0 10px 20px rgba(255,45,120,0.3)',display:'flex',alignItems:'center',gap:12,border:'1px solid rgba(255,255,255,0.2)'}}>
+          <AlertCircle size={24} color="white" />
+          <div>
+            <div style={{color:'white',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:14}}>Poin Dicuri!</div>
+            <div style={{color:'rgba(255,255,255,0.9)',fontSize:12}}>Tim {stolenAlert.fromTeam} mencuri {stolenAlert.amount} poin.</div>
+          </div>
+        </motion.div>
+      </AnimatePresence>
+    );
+  };
+
+  /* DEBUFF ALERT POPUP */
+  const DebuffAlertPopup = () => {
+    if(!debuffAlert) return null;
+    let debuffName = '';
+    if(debuffAlert.skillId === 'emoji_chaos') debuffName = 'Emoji Chaos';
+    if(debuffAlert.skillId === 'blur_vision') debuffName = 'Blur Vision';
+    if(debuffAlert.skillId === 'fake_shake') debuffName = 'Fake Shake';
+
+    return (
+      <AnimatePresence key={debuffAlertId}>
+        <motion.div initial={{opacity:0,y:-50}} animate={{opacity:1,y:0}} exit={{opacity:0,y:-50}} transition={{duration:0.3}} style={{position:'absolute',top:20,left:'50%',transform:'translateX(-50%)',zIndex:105,background:'rgba(191,90,242,0.95)',padding:'16px 20px',borderRadius:16,boxShadow:'0 10px 30px rgba(191,90,242,0.4)',display:'flex',alignItems:'center',gap:12,border:'1px solid rgba(255,255,255,0.2)'}}>
+          <AlertTriangle size={24} color="white" />
+          <div>
+            <div style={{color:'white',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:14}}>Tim Kamu Terkena Gangguan!</div>
+            <div style={{color:'rgba(255,255,255,0.9)',fontSize:12}}>Tim {debuffAlert.fromTeam} mengirimkan {debuffName}.</div>
+          </div>
+        </motion.div>
+      </AnimatePresence>
+    );
+  };
 
   /* PLAYER IN GAME UI */
 const ALL_SKILLS_DEF = {
@@ -739,8 +865,11 @@ const Skills = () => {
     const currentQuestion = room.activeQuestion;
 
     return (
-      <div style={{minHeight:'100vh',background:'#0A0A0F',display:'flex',flexDirection:'column'}}>
+      <div style={{minHeight:'100vh',background:'#0A0A0F',display:'flex',flexDirection:'column',overflow:'hidden',position:'relative'}}>
         <Header/>
+        <GuessResultPopup/>
+        <StolenAlertPopup/>
+        <DebuffAlertPopup/>
         <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:16,position:'relative'}}>
           <div style={{maxWidth:600,width:'100%',margin:'0 auto',textAlign:'center',boxSizing:'border-box',padding:'0 16px'}}>
             {isClueGiver ? (
@@ -748,22 +877,22 @@ const Skills = () => {
                 <h1 style={{fontFamily:"'Clash Display',sans-serif",fontWeight:700,fontSize:'clamp(28px,6vw,36px)',color:'#BF5AF2',marginBottom:8}}>Berikan Clue Emoji</h1>
                 <p style={{color:'#8888AA',marginBottom:32,fontSize:'clamp(14px,3.5vw,16px)'}}>Berikan clue emoji untuk: <strong style={{color:'#FFD60A'}}>{currentQuestion?.answer}</strong></p>
                 
-                <div style={{background:'rgba(26,26,38,0.8)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:20,padding:24,marginBottom:24}}>
-                  <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:16}}>
+                <div style={{background:'rgba(26,26,38,0.8)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:20,padding:'clamp(16px,4vw,24px)',marginBottom:'clamp(16px,4vw,24px)'}}>
+<div style={{display:'flex',alignItems:'center',gap:'clamp(8px,2vw,12px)',marginBottom:'clamp(12px,3vw,16px)',flexDirection:isMobile?'column':'row',justifyContent:isMobile?'center':'flex-start'}}>
                     <input 
                       type="text" 
                       value={emojis} 
                       onChange={e=>setEmojis(e.target.value.replace(/[a-zA-Z0-9]/g, ''))}
                       placeholder="Ketik emoji atau klik tombol emoji..."
                       disabled={clueSubmitted}
-                      style={{flex:1,background:'rgba(0,0,0,0.5)',border:'1px solid rgba(255,255,255,0.1)',padding:'16px 20px',borderRadius:12,color:'white',fontSize:18,outline:'none',fontFamily:"'Clash Display',sans-serif"}}
+                      style={{width:isMobile?'100%':'auto',flex:isMobile?undefined:1,minWidth:isMobile?undefined:'clamp(180px,60vw,400px)',background:'rgba(0,0,0,0.5)',border:'1px solid rgba(255,255,255,0.1)',padding:'clamp(12px,2.5vw,16px) clamp(12px,3vw,20px)',borderRadius:12,color:'white',fontSize:'clamp(14px,4vw,18px)',outline:'none',fontFamily:"'Clash Display',sans-serif",marginBottom:isMobile?'clamp(12px,3vw,16px)':0}}
                     />
                     <button 
                       onClick={()=>setShowEmojiPicker(!showEmojiPicker)}
                       disabled={clueSubmitted}
-                      style={{width:56,height:56,borderRadius:12,background:'rgba(191,90,242,0.1)',border:'1px solid rgba(191,90,242,0.3)',color:'#BF5AF2',cursor:clueSubmitted?'not-allowed':'pointer',fontSize:24,display:'flex',alignItems:'center',justifyContent:'center',opacity:clueSubmitted?0.5:1}}
+                      style={{width:isMobile?'clamp(60px,15vw,80px)':'clamp(44px,10vw,56px)',height:isMobile?'clamp(60px,15vw,80px)':'clamp(44px,10vw,56px)',borderRadius:isMobile?16:12,background:'rgba(191,90,242,0.1)',border:'1px solid rgba(191,90,242,0.3)',color:'#BF5AF2',cursor:clueSubmitted?'not-allowed':'pointer',fontSize:isMobile?'clamp(24px,6vw,32px)':'clamp(18px,4vw,24px)',display:'flex',alignItems:'center',justifyContent:'center',opacity:clueSubmitted?0.5:1,alignSelf:isMobile?'center':'auto',flexShrink:isMobile?undefined:0}}
                     >
-                      <Smile size={24}/>
+                      <Smile size={isMobile?32:24}/>
                     </button>
                   </div>
                   
@@ -777,13 +906,13 @@ const Skills = () => {
                   )}
 
                   {clueSubmitted && (
-                    <div style={{background:'rgba(48,209,88,0.1)',border:'1px solid rgba(48,209,88,0.5)',padding:'16px 20px',borderRadius:12,color:'#30D158',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:16,marginTop:16,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+                    <div style={{background:'rgba(48,209,88,0.1)',border:'1px solid rgba(48,209,88,0.5)',padding:'clamp(12px,2vw,16px) clamp(16px,3vw,20px)',borderRadius:12,color:'#30D158',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:'clamp(14px,3.5vw,16px)',marginTop:'clamp(12px,3vw,16px)',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
                       <Sparkles size={20}/> Clue emoji berhasil dikirim!
                     </div>
                   )}
                 </div>
 
-                <button onClick={submitClue} disabled={!emojis.trim() || clueSubmitted} style={{width:'100%',height:56,borderRadius:16,background:clueSubmitted?'rgba(139,65,186,0.3)':'linear-gradient(135deg,#BF5AF2,#FF2D78)',border:'1px solid ' + (clueSubmitted ? 'rgba(139,65,186,0.3)' : 'transparent'),color:clueSubmitted?'#9966CC':'white',fontFamily:"'Clash Display',sans-serif",fontWeight:700,fontSize:'clamp(16px,4vw,18px)',cursor:clueSubmitted?'not-allowed':'pointer',opacity:!emojis.trim()||clueSubmitted?0.6:1}}>
+                <button onClick={submitClue} disabled={!emojis.trim() || clueSubmitted} style={{width:'100%',height:'clamp(44px,10vw,56px)',borderRadius:16,background:clueSubmitted?'rgba(139,65,186,0.3)':'linear-gradient(135deg,#BF5AF2,#FF2D78)',border:'1px solid ' + (clueSubmitted ? 'rgba(139,65,186,0.3)' : 'transparent'),color:clueSubmitted?'#9966CC':'white',fontFamily:"'Clash Display',sans-serif",fontWeight:700,fontSize:'clamp(14px,3.5vw,18px)',cursor:clueSubmitted?'not-allowed':'pointer',opacity:!emojis.trim()||clueSubmitted?0.6:1}}>
                   Kirim Clue
                 </button>
               </>
@@ -809,8 +938,11 @@ const Skills = () => {
     const teamClue = room.clues?.[myPlayer.team] || '';
 
     return (
-      <div style={{minHeight:'100vh',background:'#0A0A0F',display:'flex',flexDirection:'column'}}>
+      <div style={{minHeight:'100vh',background:'#0A0A0F',display:'flex',flexDirection:'column',overflow:'hidden',position:'relative'}}>
         <Header/>
+        <GuessResultPopup/>
+        <StolenAlertPopup/>
+        <DebuffAlertPopup/>
         <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:16,position:'relative'}}>
           <div style={{maxWidth:600,width:'100%',margin:'0 auto',textAlign:'center',boxSizing:'border-box',padding:'0 16px'}}>
             {isGuesser ? (
@@ -838,38 +970,38 @@ const Skills = () => {
                   }
                   
                   return (
-                    <div style={{background:'rgba(26,26,38,0.8)',border:'1px solid rgba(191,90,242,0.3)',borderRadius:20,padding:'clamp(24px,5vw,32px)',marginBottom:24,position:'relative',overflow:'hidden'}}>
+                    <div style={{background:'rgba(26,26,38,0.8)',border:'1px solid rgba(191,90,242,0.3)',borderRadius:20,padding:'clamp(16px,4vw,32px)',marginBottom:'clamp(16px,4vw,24px)',position:'relative',overflow:'hidden'}}>
                       {myShield && <div style={{position:'absolute',top:0,left:0,right:0,bottom:0,border:'2px solid #30D158',borderRadius:20,boxShadow:'inset 0 0 20px rgba(48,209,88,0.2)',pointerEvents:'none'}}></div>}
-                      <div style={{color:'#BF5AF2',fontFamily:"'JetBrains Mono',monospace",fontSize:'clamp(11px,2.5vw,12px)',letterSpacing:'0.1em',marginBottom:12}}>
+                      <div style={{color:'#BF5AF2',fontFamily:"'JetBrains Mono',monospace",fontSize:'clamp(10px,2.5vw,12px)',letterSpacing:'0.1em',marginBottom:'clamp(8px,2vw,12px)'}}>
                         CLUE EMOJI {myShield && <span style={{color:'#30D158',display:'inline-flex',alignItems:'center',gap:4,marginLeft:8}}><Shield size={14}/> Shield Aktif</span>}
                       </div>
-                      <div style={{fontSize:'clamp(40px,10vw,48px)',marginBottom:16,minHeight:60,display:'flex',alignItems:'center',justifyContent:'center',animation: isPerusuh ? 'spin 3s linear infinite' : (isShake ? 'shake 0.5s ease-in-out infinite' : 'none'),filter: isBlur ? 'blur(8px)' : 'none',transition:'all 0.3s ease'}}>
+                      <div style={{fontSize:'clamp(36px,12vw,48px)',marginBottom:'clamp(12px,3vw,16px)',minHeight:'clamp(50px,15vw,60px)',display:'flex',alignItems:'center',justifyContent:'center',animation: isPerusuh ? 'extreme-spin 0.25s linear infinite' : (isShake ? 'extreme-shake 0.15s ease-in-out infinite' : 'none'),filter: isBlur ? 'blur(12px)' : 'none',transition:'all 0.3s ease'}}>
                         {teamClue || <HelpCircle size={48} color='#4A4A6A'/>}
                       </div>
-                      {!teamClue && <div style={{color:'#FF2D78',fontSize:'clamp(12px,3vw,14px)'}}>Tim kamu belum memberikan clue!</div>}
+                      {!teamClue && <div style={{color:'#FF2D78',fontSize:'clamp(11px,3vw,14px)'}}>Tim kamu belum memberikan clue!</div>}
                     </div>
                   );
                 })()}
 
                 {/* Hint System */}
-                <div style={{width:'100%',display:'flex',flexDirection:'column',gap:12,marginBottom:24}}>
-                  <button onClick={() => send({ type: 'use_hint' })} disabled={guessSubmitted || room.hintsRemaining?.[myPlayer.team] <= 0 || room.hintsForRound?.[myPlayer.team]} style={{background: room.hintsForRound?.[myPlayer.team] ? 'rgba(0,245,255,0.1)' : (room.hintsRemaining?.[myPlayer.team] > 0 ? 'rgba(255,214,10,0.1)' : 'rgba(255,255,255,0.05)'),border: `1px solid ${room.hintsForRound?.[myPlayer.team] ? 'rgba(0,245,255,0.3)' : (room.hintsRemaining?.[myPlayer.team] > 0 ? 'rgba(255,214,10,0.3)' : 'rgba(255,255,255,0.1)')}`,padding:'12px 20px',borderRadius:12,display:'flex',alignItems:'center',justifyContent:'center',gap:8,color: room.hintsForRound?.[myPlayer.team] ? '#00F5FF' : (room.hintsRemaining?.[myPlayer.team] > 0 ? '#FFD60A' : '#8888AA'),cursor: (guessSubmitted || room.hintsRemaining?.[myPlayer.team] <= 0 || room.hintsForRound?.[myPlayer.team]) ? 'not-allowed' : 'pointer',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:'clamp(12px,3vw,14px)',transition:'all 0.3s'}}>
+                <div style={{width:'100%',display:'flex',flexDirection:'column',gap:'clamp(8px,2vw,12px)',marginBottom:'clamp(16px,4vw,24px)'}}>
+                  <button onClick={() => send({ type: 'use_hint' })} disabled={guessSubmitted || room.hintsRemaining?.[myPlayer.team] <= 0 || room.hintsForRound?.[myPlayer.team]} style={{background: room.hintsForRound?.[myPlayer.team] ? 'rgba(0,245,255,0.1)' : (room.hintsRemaining?.[myPlayer.team] > 0 ? 'rgba(255,214,10,0.1)' : 'rgba(255,255,255,0.05)'),border: `1px solid ${room.hintsForRound?.[myPlayer.team] ? 'rgba(0,245,255,0.3)' : (room.hintsRemaining?.[myPlayer.team] > 0 ? 'rgba(255,214,10,0.3)' : 'rgba(255,255,255,0.1)')}`,padding:'clamp(10px,2.5vw,12px) clamp(16px,3vw,20px)',borderRadius:12,display:'flex',alignItems:'center',justifyContent:'center',gap:'clamp(6px,1.5vw,8px)',color: room.hintsForRound?.[myPlayer.team] ? '#00F5FF' : (room.hintsRemaining?.[myPlayer.team] > 0 ? '#FFD60A' : '#8888AA'),cursor: (guessSubmitted || room.hintsRemaining?.[myPlayer.team] <= 0 || room.hintsForRound?.[myPlayer.team]) ? 'not-allowed' : 'pointer',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:'clamp(11px,3vw,14px)',transition:'all 0.3s',height:'clamp(40px,8vw,48px)'}}>
                     <Lightbulb size={18}/> {room.hintsForRound?.[myPlayer.team] ? 'Hint Digunakan' : `Gunakan Hint Sistem (Sisa: ${room.hintsRemaining?.[myPlayer.team] || 0}/2)`}
                   </button>
                 </div>
 
                 {/* Answer Input */}
-                <div style={{background:'rgba(26,26,38,0.8)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:20,padding:24,marginBottom:24}}>
+                <div style={{background:'rgba(26,26,38,0.8)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:20,padding:'clamp(16px,4vw,24px)',marginBottom:'clamp(16px,4vw,24px)'}}>
                   {room.noClueTeams?.includes(myPlayer.team) ? (
-                    <div style={{textAlign:'center',padding:'16px 8px'}}>
-                      <div style={{color:'#FF2D78',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:'clamp(14px,3.5vw,16px)',marginBottom:8}}>Tim kamu belum memberikan clue!</div>
-                      <div style={{color:'#8888AA',fontSize:'clamp(12px,3vw,14px)'}}>Kamu tidak bisa menebak karena tidak ada clue.</div>
-                      <div style={{color:'#FFD60A',fontFamily:"'JetBrains Mono',monospace",fontSize:'clamp(11px,3vw,13px)',marginTop:12}}>-200 POIN PENALTY</div>
+                    <div style={{textAlign:'center',padding:'clamp(12px,2vw,16px) clamp(8px,2vw,8px)'}}>
+                      <div style={{color:'#FF2D78',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:'clamp(13px,3.5vw,16px)',marginBottom:'clamp(4px,1vw,8px)'}}>Tim kamu belum memberikan clue!</div>
+                      <div style={{color:'#8888AA',fontSize:'clamp(11px,3vw,14px)'}}>Kamu tidak bisa menebak karena tidak ada clue.</div>
+                      <div style={{color:'#FFD60A',fontFamily:"'JetBrains Mono',monospace",fontSize:'clamp(10px,3vw,13px)',marginTop:'clamp(8px,2vw,12px)'}}>-200 POIN PENALTY</div>
                     </div>
                   ) : (
                     <>
-                      <input type="text" value={guess} onChange={e=>setGuess(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submitGuess()} placeholder="Ketik jawabanmu..." disabled={guessSubmitted} style={{width:'100%',background:'rgba(0,0,0,0.5)',border:'1px solid rgba(255,255,255,0.1)',padding:'16px 20px',borderRadius:12,color:'white',fontSize:'clamp(16px,4vw,18px)',outline:'none',fontFamily:"'Clash Display',sans-serif"}}/>
-                      {guessSubmitted && <div style={{background:'rgba(48,209,88,0.1)',border:'1px solid rgba(48,209,88,0.5)',padding:'16px 20px',borderRadius:12,color:'#30D158',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:'clamp(14px,3.5vw,16px)',marginTop:16,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}><CheckCircle size={20}/> Jawaban Terkirim!</div>}
+                      <input type="text" value={guess} onChange={e=>setGuess(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submitGuess()} placeholder="Ketik jawabanmu..." disabled={guessSubmitted} style={{width:'100%',background:'rgba(0,0,0,0.5)',border:'1px solid rgba(255,255,255,0.1)',padding:'clamp(12px,2.5vw,16px) clamp(12px,3vw,20px)',borderRadius:12,color:'white',fontSize:'clamp(14px,4vw,18px)',outline:'none',fontFamily:"'Clash Display',sans-serif"}}/>
+                      {guessSubmitted && <div style={{background:'rgba(48,209,88,0.1)',border:'1px solid rgba(48,209,88,0.5)',padding:'clamp(12px,2vw,16px) clamp(16px,3vw,20px)',borderRadius:12,color:'#30D158',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:'clamp(13px,3.5vw,16px)',marginTop:'clamp(12px,3vw,16px)',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}><CheckCircle size={20}/> Jawaban Terkirim!</div>}
                     </>
                   )}
                 </div>

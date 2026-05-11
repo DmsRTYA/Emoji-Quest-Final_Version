@@ -687,7 +687,7 @@ function nextQuestion(roomId) {
     room._hintsForRound = {};
     room._perusuhTeams = [];
     broadcastRoom(roomId);
-    startGameTimer(roomId, 15, () => endCluePhase(roomId));
+    startGameTimer(roomId, 60, () => endCluePhase(roomId));
   }
 }
 
