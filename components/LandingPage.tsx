@@ -1,8 +1,8 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { Trophy, Zap, Users, Star, ChevronRight, Sparkles } from 'lucide-react';
+import { Trophy, Zap, Users, Star, ChevronRight, Sparkles, User as UserIcon } from 'lucide-react';
 
-interface Props { onOpenAuth: (mode: 'login'|'register') => void; }
+interface Props { onOpenAuth: (mode: 'login'|'register') => void; onGuestLogin?: () => void; }
 const PARTICLES = ['🎯','⭐','💎','🏆','🎮','🌟','💫','🎭','🎲','🔮','✨','🎪'];
 const FEATURES = [
   { icon:<Zap size={24}/>, title:'Mode Santai', desc:'Santai dan tebak emoji sesuai keinginanmu. Tidak ada tekanan, murni seru!', accent:'#00F5FF', badge:'CHILL', hover:'rgba(0,245,255,0.06)', hoverBorder:'rgba(0,245,255,0.35)', badgeStyle:{background:'rgba(0,245,255,0.1)',color:'#00F5FF',border:'1px solid rgba(0,245,255,0.2)'}, iconBg:'rgba(0,245,255,0.12)' },
@@ -11,7 +11,7 @@ const FEATURES = [
 ];
 const STATS=[{v:'60+',l:'Teka-teki Emoji'},{v:'10',l:'Kategori'},{v:'3',l:'Mode Game'},{v:'∞',l:'Play Tanpa Batas'}];
 
-export default function LandingPage({ onOpenAuth }: Props) {
+export default function LandingPage({ onOpenAuth, onGuestLogin }: Props) {
   const [particles, setParticles] = useState<any[]>([]);
   const [heroEmojis, setHeroEmojis] = useState(['🎯','🏆','🎮','⭐','🌟']);
   const [hovered, setHovered] = useState<number|null>(null);
@@ -62,6 +62,11 @@ export default function LandingPage({ onOpenAuth }: Props) {
             <Star size={20}/> Mulai Main Gratis <ChevronRight size={20}/>
           </button>
           <button onClick={()=>onOpenAuth('login')} style={{padding:'16px 32px',borderRadius:18,background:'rgba(0,245,255,0.08)',border:'1px solid rgba(0,245,255,0.3)',color:'#00F5FF',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:17,cursor:'pointer',transition:'all 0.25s'}} onMouseEnter={e=>{e.currentTarget.style.background='rgba(0,245,255,0.14)';}} onMouseLeave={e=>{e.currentTarget.style.background='rgba(0,245,255,0.08)';}}>Masuk ke Akun</button>
+          {onGuestLogin && (
+            <button onClick={onGuestLogin} style={{display:'flex',alignItems:'center',gap:8,padding:'16px 32px',borderRadius:18,background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',color:'#F0F0FF',fontFamily:"'Clash Display',sans-serif",fontWeight:600,fontSize:17,cursor:'pointer',transition:'all 0.25s'}} onMouseEnter={e=>{e.currentTarget.style.background='rgba(255,255,255,0.1)';e.currentTarget.style.borderColor='rgba(255,255,255,0.2)';}} onMouseLeave={e=>{e.currentTarget.style.background='rgba(255,255,255,0.05)';e.currentTarget.style.borderColor='rgba(255,255,255,0.1)';}}>
+              <UserIcon size={20}/> Coba Sebagai Tamu
+            </button>
+          )}
         </div>
         {/* Tampilan emoji */}
         <div style={{position:'relative',display:'inline-block',marginBottom:80}}>

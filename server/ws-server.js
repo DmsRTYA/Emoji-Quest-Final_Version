@@ -75,12 +75,32 @@ let pool;
 })();
 
 const wss = new WebSocketServer({ port: PORT });
+wss.on('listening', () => {
+  console.log(`[WS] WebSocket server is running on port ${PORT}`);
+});
+wss.on('error', (err) => {
+  console.error('[WS] WebSocket server error:', err);
+});
 const rooms = new Map(); // roomId -> Room details
 const clients = new Map(); // ws -> { user, location }
 
 function send(ws, data) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(data)); }
 function parseToken(url) {
-  try { return jwt.verify(new URL('ws://x' + url).searchParams.get('token'), SECRET); } catch { return null; }
+  try {
+    const token = new URL('ws://x' + url).searchParams.get('token');
+    if (token && token.startsWith('guest_')) {
+      const parts = token.substring(6).split('_');
+      const id = parseInt(parts[0], 10);
+      const username = parts.slice(1).join('_');
+      return {
+        id: id,
+        username: username,
+        avatar_color: '#8888AA',
+        avatar_url: null
+      };
+    }
+    return jwt.verify(token, SECRET);
+  } catch { return null; }
 }
 
 function broadcastGlobalRooms() {

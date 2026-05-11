@@ -31,14 +31,46 @@ export default function Home() {
 
     const token = localStorage.getItem('token');
     if (token) {
-      fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.json()).then(d => { if (d.user) setUser(d.user); })
-        .catch(() => {}).finally(() => setLoading(false));
+      if (token.startsWith('guest_')) {
+        const parts = token.substring(6).split('_');
+        const id = parseInt(parts[0], 10);
+        const username = parts.slice(1).join('_');
+        setUser({
+          id: id, username: username, email: '', avatar_color: '#8888AA',
+          rank_tier: 'Bronze', casual_score: 0, rank_score: 0,
+          pvp_wins: 0, pvp_losses: 0, total_games: 0
+        });
+        setLoading(false);
+      } else {
+        fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+          .then(r => r.json()).then(d => { if (d.user) setUser(d.user); })
+          .catch(() => {}).finally(() => setLoading(false));
+      }
     } else { setLoading(false); }
   }, []);
 
   const handleLogin = (u: User, token: string) => {
     localStorage.setItem('token', token); setUser(u); setShowAuth(false);
+  };
+
+  const handleGuestLogin = () => {
+    const uname = 'Tamu_' + Math.floor(1000 + Math.random() * 9000);
+    const guestId = -(Math.floor(100000 + Math.random() * 900000));
+    const guestUser: User = {
+      id: guestId,
+      username: uname,
+      email: '',
+      avatar_color: '#8888AA',
+      rank_tier: 'Bronze',
+      casual_score: 0,
+      rank_score: 0,
+      pvp_wins: 0,
+      pvp_losses: 0,
+      total_games: 0
+    };
+    localStorage.setItem('token', `guest_${guestId}_${uname}`);
+    setUser(guestUser);
+    setShowAuth(false);
   };
 
   if (loading) return <PageLoader label="Memuat EmojiQuest" />;
@@ -60,7 +92,7 @@ export default function Home() {
       <div style={{ position:'relative', zIndex:1 }}>
         {user
           ? <GameDashboard user={user} onLogout={() => { localStorage.removeItem('token'); setUser(null); }} setUser={setUser} />
-          : <LandingPage onOpenAuth={(m) => { setAuthMode(m); setShowAuth(true); }} />
+          : <LandingPage onOpenAuth={(m) => { setAuthMode(m); setShowAuth(true); }} onGuestLogin={handleGuestLogin} />
         }
       </div>
       {showAuth && (
